@@ -1,167 +1,134 @@
 class RomanNumeralizer
-  UNITS = [:single, :tens, :hundreds, :thousands, :tens_of_thousands, :hundreds_of_thousands]
+  I = { sym: 'I', val: 1 }.freeze
+  V = { sym: 'V', val: 5 }.freeze
+  X = { sym: 'X', val: 10 }.freeze
+  L = { sym: 'L', val: 50 }.freeze
+  C = { sym: 'C', val: 100 }.freeze
+  D = { sym: 'D', val: 500 }.freeze
+  M = { sym: 'M', val: 1000 }.freeze
 
-  I = { sym: 'I', val: 1 }
-  V = { sym: 'V', val: 5 }
-  X = { sym: 'X', val: 10 }
-  L = { sym: 'L', val: 50 }
-  C = { sym: 'C', val: 100 }
-  D = { sym: 'D', val: 500 }
-  M = { sym: 'M', val: 1000 }
+  ALL = {
+    single: {
+      base_int: 1,
+      ranges:   { 1..3 => I, 4..8 => V, 9..9 => X },
+      prepend:  { all: I[:sym] },
+      append:   { all: I[:sym] }
+    },
 
+    tens: {
+      base_int: 10,
+      ranges:   { 1..3 => X, 4..8 => L, 9..9 => C },
+      prepend:  { all: X[:sym] },
+      append:   { all: X[:sym] }
+    },
+
+    hundreds: {
+      base_int: 100,
+      ranges:   { 1..3 => C, 4..8 => D, 9..9 => M },
+      prepend:  { 1..3 => X[:sym], 4..9 => C[:sym] },
+      append:   { 1..3 => X[:sym], 4..9 => C[:sym] }
+    },
+
+    thousands: {
+      base_int: 1000,
+      ranges:   { 1..4 => M },
+      prepend:  { 1..4 => '' },
+      append:   { 1..4 => M[:sym] }
+    },
+
+    # Need to figure out nice way of implementing displaying exponents for the tens_ + hundreds_ of K's
+    tens_of_thousands: {
+      base_int: 10_000,
+      ranges:   {},
+      prepend:  {},
+      append:   {}
+    },
+
+    hundreds_of_thousands: {
+      base_int: 100_000,
+      ranges:   {},
+      prepend:  {},
+      append:   {}
+    }
+  }.freeze
+
+  BASE_NAMES = [:single, :tens, :hundreds, :thousands, :tens_of_thousands, :hundreds_of_thousands].freeze
 
   class << self
     def convert(num)
       new(num).convert
     end
-
-    def define_unit_methods!
-      UNITS.each do |unit|
-        klass     = Kernel.const_get("RomanNumeralizer::" + unit.to_s.gsub(/\A.|_./) { |m| m[-1].upcase! })
-        ivar_name = :"@#{unit}"
-        bool_name = :"#{unit}?"
-
-        define_method(unit) do
-          instance_variable_get(ivar_name) || instance_variable_set(ivar_name, klass.new(units[unit]))
-        end
-
-        define_method(bool_name) { !!public_send(unit) }
-      end
-    end
   end
 
-  attr_accessor :num, :chars, :units
+  attr_accessor :num, :chars, :name_to_char_map
 
   def initialize(num)
-    self.num   = num
-    self.chars = num.to_s.split('').map(&:to_i)
-    self.units = Hash.new(0)
-    process_units
+    self.num              = num
+    self.chars            = num.to_s.split('').map(&:to_i)
+    self.name_to_char_map = Hash.new(0)
+    build_name_to_char_map
   end
 
   def convert
-    UNITS.reverse.map { |unit| (inst = public_send(unit)) && inst.resolve }.compact.join
+    BASE_NAMES.reverse.map { |name| Converter.new(name_to_char_map[name], ALL[name]).resolve }.join
   end
 
   private
 
-  def process_units
-    chars.reverse.each_with_index { |char, i| units[UNITS[i]] = char }
+  def build_name_to_char_map
+    chars.reverse.each_with_index { |char, i| name_to_char_map[BASE_NAMES[i]] = char }
   end
 
-  module Rangeable
-    attr_accessor :start_num, :num, :base
+  class Converter
+    attr_accessor :start_number, :base_int, :ranges, :prepend_opts, :append_opts, :number, :base_numeral
 
-    def initialize(num)
-      return if num.zero?
-      self.start_num = num
-      self.num       = num * self.class::BASE
-      self.base      = find_base
+    RANGED_EXTRACTOR = -> (tuples, num) do
+      appropriate_tuple = Array(tuples).detect { |(rng, val)| rng.include?(num) }
+      appropriate_tuple.last if appropriate_tuple
+    end
+
+    def initialize(num, params)
+      self.base_int,     self.ranges      = params[:base_int], params[:ranges]
+      self.prepend_opts, self.append_opts = params[:prepend],  params[:append]
+      self.start_number, self.number      = num,               num * base_int
+
+      self.base_numeral = RANGED_EXTRACTOR.call(ranges, start_number)
     end
 
     def resolve
-      return unless num
-      return base_sym if diff.zero?
-      return prepend  if diff_lower_than_zero?
-      return append   if diff_greater_than_zero?
+      return ''               if number.zero?
+      return base_numeral_sym if diff.zero?
+      return with_prepend     if diff_lower_than_zero?
+      return with_append      if diff_greater_than_zero?
     end
 
     private
 
-    def append
-      base_sym + (append_sym * (diff / self.class::BASE))
+    def with_append
+      base_numeral_sym + (sym_to_append * (diff / base_int))
     end
 
-    def append_sym
-      append_const = self.class::APPEND
-      return append_const[:all] if append_const[:all]
-
-      extract_from(append_const.to_a)
+    def with_prepend
+      sym_to_prepend + base_numeral_sym
     end
 
-    def prepend
-      prepend_sym + base_sym
+    def sym_to_append;  get_sym(append_opts)  end
+    def sym_to_prepend; get_sym(prepend_opts) end
+
+    def get_sym(opts)
+      opts[:all] ? opts[:all] : extract_sym_from(opts)
     end
 
-    def prepend_sym
-      prepend_const = self.class::PREPEND
-      return prepend_const[:all] if prepend_const[:all]
+    def base_numeral_sym; base_numeral[:sym] end
+    def base_numeral_val; base_numeral[:val] end
 
-      extract_from(prepend_const.to_a)
-    end
-
-    def base_sym; base[:sym] end
-
-    def base_val; base[:val] end
-
-    def diff; num - base_val end
+    def diff; number - base_numeral_val end
 
     def diff_lower_than_zero?;   diff < 0 end
-
     def diff_greater_than_zero?; diff > 0 end
 
-    def extract_from(collection)
-      collection.detect { |(rng, val)| rng.include?(start_num) }.last
+    def extract_sym_from(opts)
+      RANGED_EXTRACTOR.call(opts, start_number)
     end
-
-    def find_base
-      extract_from(self.class::RANGES)
-    end
-  end
-
-  class Single
-    include Rangeable
-
-    BASE    = 1
-    RANGES  = [[1..3, I], [4..8, V], [9..9, X]]
-    PREPEND = { all: I[:sym] }
-    APPEND  = { all: I[:sym] }
-  end
-
-  class Tens
-    include Rangeable
-
-    BASE    = 10
-    RANGES  = [[1..3, X], [4..8, L], [9..9, C]]
-    PREPEND = { all: X[:sym] }
-    APPEND  = { all: X[:sym] }
-  end
-
-  class Hundreds
-    include Rangeable
-
-    BASE    = 100
-    RANGES  = [[1..3, C], [4..8, D], [9..9, M]]
-    PREPEND = { 1..3 => X[:sym], 4..9 => C[:sym] }
-    APPEND  = { 1..3 => X[:sym], 4..9 => C[:sym] }
-  end
-
-  class Thousands
-    include Rangeable
-
-    BASE    = 1000
-    RANGES  = [[1..4, M]]
-    PREPEND = { 1..4 => '' }
-    APPEND  = { 1..4 => 'M' }
-  end
-
-  class TensOfThousands
-    include Rangeable
-
-    BASE    = 10_000
-    RANGES  = []
-    PREPEND = {}
-    APPEND  = {}
-  end
-
-  class HundredsOfThousands
-    include Rangeable
-
-    BASE    = 100_000
-    RANGES  = []
-    PREPEND = {}
-    APPEND  = {}
   end
 end
-
-RomanNumeralizer.define_unit_methods!
